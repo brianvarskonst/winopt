@@ -26,6 +26,9 @@
   PowerShell.exe -ExecutionPolicy Bypass -File .\win11_gaming_tune.ps1 -Mode Optimize -Profile Aggressive -Cs2Mode -DisableXboxServices -DisableRemoteDiscoveryServices -DisableSearchIndexing
 
 .EXAMPLE
+  PowerShell.exe -ExecutionPolicy Bypass -File .\win11_gaming_tune.ps1 -Mode Optimize -Profile Aggressive -Cs2Mode -AddDefenderExclusions -DisableXboxServices -DisableRemoteDiscoveryServices -DisableSearchIndexing
+
+.EXAMPLE
   PowerShell.exe -ExecutionPolicy Bypass -File .\win11_gaming_tune.ps1 -Mode Restore
 #>
 
@@ -47,6 +50,9 @@ param(
     [switch]$DisableRemoteDiscoveryServices,
     [switch]$DisableVbs,
     [switch]$Cs2Mode,
+    [switch]$AddDefenderExclusions,
+    [string]$SteamRootPath,
+    [string]$Cs2GamePath,
     [switch]$SkipRestorePoint
 )
 
@@ -59,11 +65,12 @@ if (-not $BackupPath) {
 }
 
 $script:Backup = [ordered]@{
-    ScriptVersion     = "1.1"
+    ScriptVersion     = "1.2"
     CreatedUtc        = (Get-Date).ToUniversalTime().ToString("o")
     ComputerName      = $env:COMPUTERNAME
     ActivePowerScheme = $null
     PowerSettings     = @()
+    DefenderExclusions = @()
     Services          = @()
     Registry          = @()
     ScheduledTasks    = @()
@@ -75,6 +82,7 @@ $script:SeenRegistry = [System.Collections.Generic.HashSet[string]]::new([System
 $script:SeenTasks = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $script:SeenBcdSettings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $script:SeenPowerSettings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$script:SeenDefenderExclusions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $script:PowerSettingGuids = @{
     SUB_USB         = "2a737441-1930-4402-8d77-b2bebba308a3"
     USBSELECTIVE    = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
@@ -271,6 +279,225 @@ function Restore-PowerSettingConfiguration {
 
     powercfg /SETACTIVE $Entry.SchemeGuid | Out-Null
     Write-InfoLine ("Power setting restored: {0}/{1}" -f $Entry.SubgroupGuid, $Entry.SettingGuid)
+}
+
+function ConvertTo-NormalizedWindowsPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $normalized = $Path.Trim().Trim('"')
+    $normalized = $normalized.Replace("/", "\")
+    return $normalized
+}
+
+function Get-UniqueExistingPaths {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Paths
+    )
+
+    $result = New-Object System.Collections.Generic.List[string]
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($path in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        $normalized = ConvertTo-NormalizedWindowsPath -Path $path
+        if ((Test-Path -Path $normalized) -and $seen.Add($normalized)) {
+            $result.Add($normalized)
+        }
+    }
+
+    return $result
+}
+
+function Get-SteamRootCandidates {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if ($SteamRootPath) {
+        $candidates.Add($SteamRootPath)
+    }
+
+    $registryKeys = @(
+        "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
+        "HKLM:\SOFTWARE\Valve\Steam",
+        "HKCU:\Software\Valve\Steam"
+    )
+
+    foreach ($key in $registryKeys) {
+        if (-not (Test-Path -Path $key)) {
+            continue
+        }
+
+        $properties = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+        foreach ($propertyName in @("InstallPath", "SteamPath")) {
+            $value = $properties.$propertyName
+            if ($value) {
+                $candidates.Add([string]$value)
+            }
+        }
+    }
+
+    $candidates.Add("C:\Program Files (x86)\Steam")
+    $candidates.Add("C:\Program Files\Steam")
+
+    return Get-UniqueExistingPaths -Paths $candidates
+}
+
+function Get-SteamLibraryPaths {
+    $libraries = New-Object System.Collections.Generic.List[string]
+
+    foreach ($steamRoot in (Get-SteamRootCandidates)) {
+        $libraries.Add($steamRoot)
+
+        $libraryFile = Join-Path $steamRoot "steamapps\libraryfolders.vdf"
+        if (-not (Test-Path -Path $libraryFile)) {
+            continue
+        }
+
+        foreach ($line in (Get-Content -Path $libraryFile -ErrorAction SilentlyContinue)) {
+            if ($line -match '"path"\s+"([^"]+)"') {
+                $libraryPath = $Matches[1].Replace("\\", "\")
+                if ($libraryPath) {
+                    $libraries.Add($libraryPath)
+                }
+            }
+        }
+    }
+
+    return Get-UniqueExistingPaths -Paths $libraries
+}
+
+function Get-Cs2InstallInfo {
+    if ($Cs2GamePath) {
+        $basePath = ConvertTo-NormalizedWindowsPath -Path $Cs2GamePath
+        if (Test-Path -Path $basePath -PathType Leaf) {
+            if ([System.IO.Path]::GetFileName($basePath).Equals("cs2.exe", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $gamePath = Split-Path -Path $basePath -Parent
+                if ($basePath -match "(?i)\\game\\bin\\win64\\cs2\.exe$") {
+                    $gamePath = Split-Path -Path (Split-Path -Path (Split-Path -Path (Split-Path -Path $basePath -Parent) -Parent) -Parent) -Parent
+                }
+
+                return [pscustomobject]@{
+                    ExePath  = $basePath
+                    GamePath = $gamePath
+                }
+            }
+        }
+
+        if (Test-Path -Path $basePath -PathType Container) {
+            $candidateExePaths = @(
+                (Join-Path $basePath "game\bin\win64\cs2.exe"),
+                (Join-Path $basePath "cs2.exe")
+            )
+
+            foreach ($candidate in $candidateExePaths) {
+                if (Test-Path -Path $candidate -PathType Leaf) {
+                    return [pscustomobject]@{
+                        ExePath  = $candidate
+                        GamePath = $basePath
+                    }
+                }
+            }
+        }
+    }
+
+    $gameRootCandidates = @(
+        "steamapps\common\Counter-Strike Global Offensive",
+        "steamapps\common\Counter-Strike 2"
+    )
+
+    foreach ($library in (Get-SteamLibraryPaths)) {
+        foreach ($relativePath in $gameRootCandidates) {
+            $gameRoot = Join-Path $library $relativePath
+            $exePath = Join-Path $gameRoot "game\bin\win64\cs2.exe"
+            if (Test-Path -Path $exePath) {
+                return [pscustomobject]@{
+                    ExePath = $exePath
+                    GamePath = $gameRoot
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+function Add-DefenderExclusionIfMissing {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Path", "Process")]
+        [string]$Type,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $normalizedValue = ConvertTo-NormalizedWindowsPath -Path $Value
+    $id = "$Type|$normalizedValue"
+    if ($script:SeenDefenderExclusions.Contains($id)) {
+        return
+    }
+
+    try {
+        $preferences = Get-MpPreference -ErrorAction Stop
+    }
+    catch {
+        Write-WarnLine ("Microsoft Defender preferences could not be read: {0}" -f $_.Exception.Message)
+        return
+    }
+
+    $existingValues = if ($Type -eq "Path") { @($preferences.ExclusionPath) } else { @($preferences.ExclusionProcess) }
+    if ($existingValues -contains $normalizedValue) {
+        $null = $script:SeenDefenderExclusions.Add($id)
+        Write-InfoLine ("Defender exclusion already present: {0}" -f $normalizedValue)
+        return
+    }
+
+    try {
+        if ($Type -eq "Path") {
+            Add-MpPreference -ExclusionPath $normalizedValue -ErrorAction Stop
+        }
+        else {
+            Add-MpPreference -ExclusionProcess $normalizedValue -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-WarnLine ("Could not add Defender exclusion for {0}: {1}" -f $normalizedValue, $_.Exception.Message)
+        Write-WarnLine "Tamper Protection or Defender policy may have blocked the change."
+        return
+    }
+
+    $null = $script:SeenDefenderExclusions.Add($id)
+    $script:Backup.DefenderExclusions += [pscustomobject]@{
+        Type  = $Type
+        Value = $normalizedValue
+    }
+    Write-InfoLine ("Defender exclusion added: {0}" -f $normalizedValue)
+}
+
+function Remove-DefenderExclusionIfPresent {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    $type = [string]$Entry.Type
+    $value = ConvertTo-NormalizedWindowsPath -Path ([string]$Entry.Value)
+
+    try {
+        if ($type -eq "Path") {
+            Remove-MpPreference -ExclusionPath $value -ErrorAction Stop
+        }
+        else {
+            Remove-MpPreference -ExclusionProcess $value -ErrorAction Stop
+        }
+        Write-InfoLine ("Defender exclusion removed: {0}" -f $value)
+    }
+    catch {
+        Write-WarnLine ("Could not remove Defender exclusion {0}: {1}" -f $value, $_.Exception.Message)
+    }
 }
 
 function Backup-RegistryValue {
@@ -702,6 +929,53 @@ function Apply-Cs2CompetitiveTweaks {
     Write-WarnLine "CS2 mode favors lower latency and steadier frametimes over heat, idle power draw, and battery life."
 }
 
+function Apply-Cs2DefenderExclusions {
+    if (-not $AddDefenderExclusions) {
+        return
+    }
+
+    Write-Section "Applying Defender Exclusions"
+
+    $steamRoots = @(Get-SteamRootCandidates)
+    $cs2Install = Get-Cs2InstallInfo
+
+    foreach ($steamRoot in $steamRoots) {
+        $steamExe = Join-Path $steamRoot "steam.exe"
+        $steamServiceExe = Join-Path $steamRoot "bin\steamservice.exe"
+
+        if (Test-Path -Path $steamExe) {
+            Add-DefenderExclusionIfMissing -Type Process -Value $steamExe
+        }
+
+        if (Test-Path -Path $steamServiceExe) {
+            Add-DefenderExclusionIfMissing -Type Process -Value $steamServiceExe
+        }
+    }
+
+    if ($cs2Install) {
+        Add-DefenderExclusionIfMissing -Type Path -Value $cs2Install.GamePath
+        Add-DefenderExclusionIfMissing -Type Process -Value $cs2Install.ExePath
+    }
+    else {
+        Write-WarnLine "CS2 install could not be auto-detected. Use -Cs2GamePath if you want Defender exclusions for a custom location."
+    }
+
+    Write-WarnLine "Defender exclusions are a security tradeoff. Only use them on paths and executables you trust."
+}
+
+function Write-Cs2ManualChecklist {
+    if (-not $Cs2Mode) {
+        return
+    }
+
+    Write-Section "Manual CS2 Checklist"
+    Write-Host "These high-impact items are not set by the script and should be checked manually:" -ForegroundColor White
+    Write-Host "  - BIOS: A-XMP enabled, RAM/FCLK tuned, Re-Size BAR and Above 4G Decoding enabled." -ForegroundColor White
+    Write-Host "  - AMD Adrenalin for cs2.exe: Anti-Lag ON, Chill OFF, Boost OFF, AFMF OFF, HYPR-RX OFF." -ForegroundColor White
+    Write-Host "  - Display: maximum monitor refresh rate selected and FreeSync/VRR configured intentionally." -ForegroundColor White
+    Write-Host "  - CS2: test exclusive fullscreen first, and keep overlays to an absolute minimum." -ForegroundColor White
+}
+
 function Apply-ScheduledTaskTweaks {
     Write-Section "Disabling Background Scheduled Tasks"
 
@@ -824,6 +1098,12 @@ function Restore-Optimizations {
         }
     }
 
+    if ($savedBackup.DefenderExclusions) {
+        foreach ($entry in $savedBackup.DefenderExclusions) {
+            Remove-DefenderExclusionIfPresent -Entry $entry
+        }
+    }
+
     if ($savedBackup.ScheduledTasks) {
         foreach ($entry in $savedBackup.ScheduledTasks) {
             Set-ScheduledTaskEnabledState -TaskPath $entry.TaskPath -TaskName $entry.TaskName -Enabled ([bool]$entry.Enabled)
@@ -854,8 +1134,10 @@ function Invoke-Optimization {
     Enable-UltimatePerformancePlan
     Apply-RegistryTweaks
     Apply-Cs2CompetitiveTweaks
+    Apply-Cs2DefenderExclusions
     Apply-ScheduledTaskTweaks
     Apply-ServiceTweaks
+    Write-Cs2ManualChecklist
 
     Save-BackupFile
 

@@ -9,6 +9,21 @@ Windows 11 / kirbyOS Gaming- und CS2-Tuning für ein System mit:
 
 Der Fokus dieses Projekts liegt auf niedrigerer Input-Latenz, besseren Frametimes und einer sauberen, rückgängig machbaren Windows-Optimierung für Counter-Strike 2.
 
+## Wichtigste Tipps zuerst
+
+Wenn du mit `Ryzen 7 5800X + RX 7900 XTX + MSI MAG B550 TOMAHAWK` in CS2 wirklich noch spürbar etwas holen willst, sind diese Punkte meistens wichtiger als noch mehr Service-Cuts:
+
+1. `AMD B550 Chipset Driver` und `AMD Adrenalin` aktuell halten.
+2. Im BIOS `A-XMP` aktivieren und RAM/FCLK sauber im 1:1-Modus fahren.
+   Ideal ist oft `DDR4-3600 + FCLK 1800`, alternativ `DDR4-3200 + FCLK 1600`.
+3. `Above 4G Decoding` und `Re-Size BAR Support` aktivieren.
+   Das ist die Grundlage für AMD Smart Access Memory / SAM.
+4. In Adrenalin für `cs2.exe`: `Anti-Lag ON`, `Chill OFF`, `Boost OFF`, `AFMF OFF`, `HYPR-RX OFF`.
+5. Monitor auf maximale Hz stellen und für CS2 zuerst `Exklusives Fullscreen` testen.
+6. Wenn du Borderless spielst, `Optimizations for windowed games` in Windows 11 testen.
+
+Diese Punkte sind teilweise nicht sauber per PowerShell automatisierbar und gehören deshalb bewusst in die Dokumentation statt in ein blindes Registry-Skript.
+
 ## Enthalten
 
 - [`win11_gaming_tune.ps1`](./win11_gaming_tune.ps1)
@@ -20,6 +35,12 @@ PowerShell als Administrator öffnen und im Projektordner ausführen:
 
 ```powershell
 PowerShell.exe -ExecutionPolicy Bypass -File .\win11_gaming_tune.ps1 -Mode Optimize -Profile Aggressive -Cs2Mode -DisableXboxServices -DisableRemoteDiscoveryServices -DisableSearchIndexing
+```
+
+Mit optionalen Defender-Exclusions für Steam und CS2:
+
+```powershell
+PowerShell.exe -ExecutionPolicy Bypass -File .\win11_gaming_tune.ps1 -Mode Optimize -Profile Aggressive -Cs2Mode -AddDefenderExclusions -DisableXboxServices -DisableRemoteDiscoveryServices -DisableSearchIndexing
 ```
 
 Optional, wenn du die Funktionen wirklich nicht brauchst:
@@ -48,6 +69,8 @@ PowerShell.exe -ExecutionPolicy Bypass -File .\win11_gaming_tune.ps1 -Mode Resto
   - CPU Min/Max auf 100
   - Core Parking aus
   - aggressiverer CPU-Boost für kompetitives Gaming
+- kann optional mit `-AddDefenderExclusions` Defender-Exclusions für Steam und CS2 setzen
+- zeigt am Ende eine kurze manuelle CS2-Checkliste für BIOS, Adrenalin und Display an
 
 ## Empfohlene Hardware- und BIOS-Settings
 
